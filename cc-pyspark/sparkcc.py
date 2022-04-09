@@ -104,7 +104,7 @@ class CCSparkJob(object):
         pass
 
     def validate_arguments(self, args):
-        if "orc" == args.output_format and "gzip" == args.output_compression:
+        if args.output_format == "orc" and args.output_compression == "gzip":
             # gzip for Parquet, zlib for ORC
             args.output_compression = "zlib"
         return True
@@ -198,38 +198,36 @@ class CCSparkJob(object):
         for uri in iterator:
             self.warc_input_processed.add(1)
             if uri.startswith('s3://'):
-                self.get_logger().info('Reading from S3 {}'.format(uri))
+                self.get_logger().info(f'Reading from S3 {uri}')
                 s3match = s3pattern.match(uri)
                 if s3match is None:
-                    self.get_logger().error("Invalid S3 URI: " + uri)
+                    self.get_logger().error(f"Invalid S3 URI: {uri}")
                     continue
-                bucketname = s3match.group(1)
-                path = s3match.group(2)
+                bucketname = s3match[1]
+                path = s3match[2]
                 warctemp = TemporaryFile(mode='w+b',
                                          dir=self.args.local_temp_dir)
                 try:
                     s3client.download_fileobj(bucketname, path, warctemp)
                 except botocore.client.ClientError as exception:
-                    self.get_logger().error(
-                        'Failed to download {}: {}'.format(uri, exception))
+                    self.get_logger().error(f'Failed to download {uri}: {exception}')
                     self.warc_input_failed.add(1)
                     warctemp.close()
                     continue
                 warctemp.seek(0)
                 stream = warctemp
             elif uri.startswith('hdfs://'):
-                self.get_logger().error("HDFS input not implemented: " + uri)
+                self.get_logger().error(f"HDFS input not implemented: {uri}")
                 continue
             else:
-                self.get_logger().info('Reading local stream {}'.format(uri))
+                self.get_logger().info(f'Reading local stream {uri}')
                 if uri.startswith('file:'):
                     uri = uri[5:]
                 uri = os.path.join(base_dir, uri)
                 try:
                     stream = open(uri, 'rb')
                 except IOError as exception:
-                    self.get_logger().error(
-                        'Failed to open {}: {}'.format(uri, exception))
+                    self.get_logger().error(f'Failed to open {uri}: {exception}')
                     self.warc_input_failed.add(1)
                     continue
 
@@ -237,12 +235,10 @@ class CCSparkJob(object):
             try:
                 archive_iterator = ArchiveIterator(stream,
                                                    no_record_parse=no_parse)
-                for res in self.iterate_records(uri, archive_iterator):
-                    yield res
+                yield from self.iterate_records(uri, archive_iterator)
             except ArchiveLoadFailed as exception:
                 self.warc_input_failed.add(1)
-                self.get_logger().error(
-                    'Invalid WARC: {} - {}'.format(uri, exception))
+                self.get_logger().error(f'Invalid WARC: {uri} - {exception}')
             finally:
                 stream.close()
 
@@ -254,8 +250,7 @@ class CCSparkJob(object):
            and allows to access also values from ArchiveIterator, namely
            WARC record offset and length."""
         for record in archive_iterator:
-            for res in self.process_record(record):
-                yield res
+            yield from self.process_record(record)
             self.records_processed.add(1)
             # WARC record offset and length should be read after the record
             # has been processed, otherwise the record content is consumed
@@ -283,10 +278,7 @@ class CCSparkJob(object):
             (record.rec_headers['WARC-Identified-Payload-Type'] in
              html_types)):
             return True
-        for html_type in html_types:
-            if html_type in record.content_type:
-                return True
-        return False
+        return any(html_type in record.content_type for html_type in html_types)
 
 
 class CCIndexSparkJob(CCSparkJob):
@@ -314,7 +306,7 @@ class CCIndexSparkJob(CCSparkJob):
 
     def execute_query(self, sc, spark, query):
         sqldf = spark.sql(query)
-        self.get_logger(sc).info("Executing query: {}".format(query))
+        self.get_logger(sc).info(f"Executing query: {query}")
         sqldf.explain()
         return sqldf
 
@@ -330,11 +322,12 @@ class CCIndexSparkJob(CCSparkJob):
 
         num_rows = sqldf.count()
         self.get_logger(sc).info(
-            "Number of records/rows matched by query: {}".format(num_rows))
+            f"Number of records/rows matched by query: {num_rows}"
+        )
+
 
         if partitions > 0:
-            self.get_logger(sc).info(
-                "Repartitioning data to {} partitions".format(partitions))
+            self.get_logger(sc).info(f"Repartitioning data to {partitions} partitions")
             sqldf = sqldf.repartition(partitions)
 
         return sqldf
@@ -385,30 +378,30 @@ class CCIndexWarcSparkJob(CCIndexSparkJob):
             warc_path = row[1]
             offset = int(row[2])
             length = int(row[3])
-            self.get_logger().debug("Fetching WARC record for {}".format(url))
-            rangereq = 'bytes={}-{}'.format(offset, (offset+length-1))
+            self.get_logger().debug(f"Fetching WARC record for {url}")
+            rangereq = f'bytes={offset}-{offset+length - 1}'
             try:
                 response = s3client.get_object(Bucket=bucketname,
                                                Key=warc_path,
                                                Range=rangereq)
             except botocore.client.ClientError as exception:
                 self.get_logger().error(
-                    'Failed to download: {} ({}, offset: {}, length: {}) - {}'
-                    .format(url, warc_path, offset, length, exception))
+                    f'Failed to download: {url} ({warc_path}, offset: {offset}, length: {length}) - {exception}'
+                )
+
                 self.warc_input_failed.add(1)
                 continue
             record_stream = BytesIO(response["Body"].read())
             try:
                 for record in ArchiveIterator(record_stream,
                                               no_record_parse=no_parse):
-                    for res in self.process_record(record):
-                        yield res
+                    yield from self.process_record(record)
                     self.records_processed.add(1)
             except ArchiveLoadFailed as exception:
                 self.warc_input_failed.add(1)
                 self.get_logger().error(
-                    'Invalid WARC record: {} ({}, offset: {}, length: {}) - {}'
-                    .format(url, warc_path, offset, length, exception))
+                    f'Invalid WARC record: {url} ({warc_path}, offset: {offset}, length: {length}) - {exception}'
+                )
 
     def run_job(self, sc, sqlc):
         sqldf = self.load_dataframe(sc, self.args.num_input_partitions)
