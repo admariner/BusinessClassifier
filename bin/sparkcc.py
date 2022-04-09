@@ -143,8 +143,7 @@ class CCSparkJob:
             .format("parquet") \
             .saveAsTable(self.args.output)
 
-        self.get_logger(sc).info('records processed = {}'.format(
-            self.records_processed.value))
+        self.get_logger(sc).info(f'records processed = {self.records_processed.value}')
 
     def process_warcs(self, id_, iterator):
         s3pattern = re.compile('^s3://([^/]+)/(.+)')
@@ -158,38 +157,36 @@ class CCSparkJob:
         for uri in iterator:
             self.warc_input_processed.add(1)
             if uri.startswith('s3://'):
-                self.get_logger().info('Reading from S3 {}'.format(uri))
+                self.get_logger().info(f'Reading from S3 {uri}')
                 s3match = s3pattern.match(uri)
                 if s3match is None:
-                    self.get_logger().error("Invalid S3 URI: " + uri)
+                    self.get_logger().error(f"Invalid S3 URI: {uri}")
                     continue
-                bucketname = s3match.group(1)
-                path = s3match.group(2)
+                bucketname = s3match[1]
+                path = s3match[2]
                 warctemp = TemporaryFile(mode='w+b',
                                          dir=self.args.local_temp_dir)
                 try:
                     s3client.download_fileobj(bucketname, path, warctemp)
                 except botocore.client.ClientError as exception:
-                    self.get_logger().error(
-                        'Failed to download {}: {}'.format(uri, exception))
+                    self.get_logger().error(f'Failed to download {uri}: {exception}')
                     self.warc_input_failed.add(1)
                     warctemp.close()
                     continue
                 warctemp.seek(0)
                 stream = warctemp
             elif uri.startswith('hdfs://'):
-                self.get_logger().error("HDFS input not implemented: " + uri)
+                self.get_logger().error(f"HDFS input not implemented: {uri}")
                 continue
             else:
-                self.get_logger().info('Reading local stream {}'.format(uri))
+                self.get_logger().info(f'Reading local stream {uri}')
                 if uri.startswith('file:'):
                     uri = uri[5:]
                 uri = os.path.join(base_dir, uri)
                 try:
                     stream = open(uri, 'rb')
                 except IOError as exception:
-                    self.get_logger().error(
-                        'Failed to open {}: {}'.format(uri, exception))
+                    self.get_logger().error(f'Failed to open {uri}: {exception}')
                     self.warc_input_failed.add(1)
                     continue
 
@@ -197,14 +194,12 @@ class CCSparkJob:
             try:
                 for record in ArchiveIterator(stream,
                                               no_record_parse=no_parse):
-                    for res in self.process_record(record):
-                        yield res
+                    yield from self.process_record(record)
                     self.records_processed.add(1)
 
             except ArchiveLoadFailed as exception:
                 self.warc_input_failed.add(1)
-                self.get_logger().error(
-                    'Invalid WARC: {} - {}'.format(uri, exception))
+                self.get_logger().error(f'Invalid WARC: {uri} - {exception}')
             finally:
                 stream.close()
 
@@ -231,7 +226,4 @@ class CCSparkJob:
             (record.rec_headers['WARC-Identified-Payload-Type'] in
              html_types)):
             return True
-        for html_type in html_types:
-            if html_type in record.content_type:
-                return True
-        return False
+        return any(html_type in record.content_type for html_type in html_types)
